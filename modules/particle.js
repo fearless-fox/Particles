@@ -43,8 +43,8 @@ export default class Particle {
                 this.velocity.y += (Math.random() - 0.5) * this.particleParams.glitchJitter * deltaTime;
                 this.velocity.z += (Math.random() - 0.5) * this.particleParams.glitchJitter * deltaTime;
 
-                // Damping
-                this.velocity.multiplyScalar(this.particleParams.damping);
+                // Damping (frame-rate independent: 0.92 ~= per-frame at 60fps)
+                this.velocity.multiplyScalar(Math.pow(this.particleParams.damping, deltaTime * 60));
 
                 // Interaction will be handled in app.js and passed down
                 break;

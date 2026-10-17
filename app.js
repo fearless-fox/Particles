@@ -79,9 +79,9 @@ class App {
 
         this.glitchParams = {
             ...this.zenParams,
-            attractionForce: 1.5,
+            anchorStrength: 0.5,
             damping: 0.92,
-            jitter: 0.5,
+            glitchJitter: 1.0,
             influenceRadius: 15,
             snapSpeed: 3.0,
             mode: 'glitch',
