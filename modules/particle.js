@@ -1,3 +1,8 @@
+// Shared zero vector for the glitch anchor fallback (never mutated, only copied from).
+const ZERO_CENTER = new THREE.Vector3(0, 0, 0);
+// Net spring strength: how hard the net pushes a stray particle back inside.
+const NET_STRENGTH = 8;
+
 export default class Particle {
     constructor(position, velocity, particleParams) {
         this.position = position.clone();
@@ -34,9 +39,25 @@ export default class Particle {
                 break;
 
             case 'glitch':
-                // Anchor to center
-                let toCenter = new THREE.Vector3().copy(this.position).negate();
+                // Anchor to the hive's cluster center, which drifts (see app.js).
+                // Falls back to the origin so stream.js, which carries no cluster
+                // state, keeps working exactly as before.
+                const center = this.particleParams.clusterCenter || ZERO_CENTER;
+                const toCenter = new THREE.Vector3().copy(center).sub(this.position);
                 this.velocity.add(toCenter.multiplyScalar(this.particleParams.anchorStrength * deltaTime));
+
+                // Net containment: a soft spring that pushes the particle back
+                // inside netRadius of the cluster center. No hard clamp, so the
+                // hive never pops — it just can't leave the net.
+                const netRadius = this.particleParams.netRadius;
+                if (netRadius !== undefined) {
+                    const distFromCenter = this.position.distanceTo(center);
+                    if (distFromCenter > netRadius) {
+                        const backInside = new THREE.Vector3().copy(center).sub(this.position).normalize()
+                            .multiplyScalar((distFromCenter - netRadius) * NET_STRENGTH * deltaTime);
+                        this.velocity.add(backInside);
+                    }
+                }
 
                 // Jitter
                 this.velocity.x += (Math.random() - 0.5) * this.particleParams.glitchJitter * deltaTime;
@@ -46,7 +67,6 @@ export default class Particle {
                 // Damping (frame-rate independent: 0.92 ~= per-frame at 60fps)
                 this.velocity.multiplyScalar(Math.pow(this.particleParams.damping, deltaTime * 60));
 
-                // Interaction will be handled in app.js and passed down
                 break;
 
             case 'zen':

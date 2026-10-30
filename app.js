@@ -8,6 +8,7 @@ class App {
         this.renderer = null;
         this.particleSystem = null;
         this.ui = null;
+        this.netMesh = null;
         this.animationId = null;
         this.isAnimating = true;
         // Audio properties (commented out for now)
@@ -84,6 +85,16 @@ class App {
             glitchJitter: 1.0,
             influenceRadius: 15,
             snapSpeed: 3.0,
+            // Net-hive state: the hive lives inside netRadius of clusterCenter,
+            // clicks attract attractCount particles from the click's side, each
+            // click nudges the cluster by clusterDrift, and gravity (scaled by
+            // clusterGravity) pulls the cluster far harder than any click does.
+            netRadius: 12,
+            attractCount: 8,
+            clusterDrift: 0.5,
+            clusterGravity: 1.0,
+            clusterCenter: new THREE.Vector3(),
+            clusterVelocity: new THREE.Vector3(),
             mode: 'glitch',
             zenMode: false,
         };
@@ -105,6 +116,13 @@ class App {
         this.particleSystem = new ParticleSystem(this.scene, this.particleParams);
         this.scene.add(this.createGradientSphere());
 
+        // The net: a faint wireframe sphere around the hive, only in glitch mode.
+        const netGeometry = new THREE.SphereGeometry(1, 20, 14);
+        const netMaterial = new THREE.LineBasicMaterial({ color: 0xC13E1B, transparent: true, opacity: 0.10 });
+        this.netMesh = new THREE.LineSegments(new THREE.WireframeGeometry(netGeometry), netMaterial);
+        this.netMesh.visible = false;
+        this.scene.add(this.netMesh);
+
         this.ui = new UI(this);
         this.ui.setupControls();
         
@@ -125,6 +143,9 @@ class App {
                 break;
             case 'glitch':
                 this.particleParams = this.glitchParams;
+                // Fresh hive every time you enter glitch mode: centered, at rest.
+                this.glitchParams.clusterCenter.set(0, 0, 0);
+                this.glitchParams.clusterVelocity.set(0, 0, 0);
                 // this.activeSynth = this.glitchSynth; // Commented out
                 break;
             case 'zen':
@@ -132,6 +153,10 @@ class App {
                 this.particleParams = this.zenParams;
                 // this.activeSynth = this.synth; // Commented out
                 break;
+        }
+        // The net only shows in glitch mode.
+        if (this.netMesh) {
+            this.netMesh.visible = (mode === 'glitch');
         }
         // Update particle system with new parameters
         this.particleSystem.particleParams = this.particleParams;
@@ -408,16 +433,70 @@ class App {
     applyGlitchForce(target) {
         if (!this.particleSystem || this.physicsMode !== 'glitch') return;
 
-        const influenceRadiusSq = this.particleParams.influenceRadius * this.particleParams.influenceRadius;
+        const params = this.particleParams;
+        const center = params.clusterCenter || new THREE.Vector3();
+        const influenceRadiusSq = params.influenceRadius * params.influenceRadius;
 
+        // Which side of the net the click is on, seen from the cluster center.
+        const sideDir = target.clone().sub(center);
+
+        // A few, not the swarm: only particles on the click's side of the hive
+        // and inside the influence radius, nearest to the click first.
+        const candidates = [];
         this.particleSystem.particles.forEach(particle => {
             const distSq = particle.position.distanceToSquared(target);
-
-            if (distSq < influenceRadiusSq) {
-                const force = target.clone().sub(particle.position).normalize().multiplyScalar(this.particleParams.snapSpeed);
-                particle.velocity.add(force);
+            if (distSq >= influenceRadiusSq) return;
+            if (sideDir.lengthSq() > 0.0001) {
+                const toParticle = particle.position.clone().sub(center);
+                if (toParticle.dot(sideDir) <= 0) return;
             }
+            candidates.push({ particle, distSq });
         });
+        candidates.sort((a, b) => a.distSq - b.distSq);
+        const few = candidates.slice(0, Math.max(1, Math.round(params.attractCount || 8)));
+        few.forEach(({ particle }) => {
+            const force = target.clone().sub(particle.position).normalize().multiplyScalar(params.snapSpeed);
+            particle.velocity.add(force);
+            particle.isAffectedByInteraction = true;
+        });
+
+        // The pull slowly drags the whole cluster toward the click. Gravity
+        // (in updateCluster) hits it far harder than this nudge does.
+        if (sideDir.lengthSq() > 0.0001 && params.clusterVelocity) {
+            const nudge = sideDir.clone().normalize().multiplyScalar(params.clusterDrift || 0.5);
+            params.clusterVelocity.add(nudge);
+        }
+    }
+
+    updateCluster(deltaTime) {
+        if (this.physicsMode !== 'glitch') return;
+        const params = this.particleParams;
+        if (!params.clusterCenter || !params.clusterVelocity) return;
+
+        const dt = Math.min(deltaTime, 0.05);
+
+        // Gravity dominates the cluster: a steady pull, while click nudges are
+        // small one-off impulses. Uses the panel's gravity value, scaled.
+        params.clusterVelocity.y += (params.gravity || 0) * (params.clusterGravity || 1) * dt;
+
+        // Leash: a gentle spring toward home so the hive can sag and drift but
+        // never wander off-screen entirely.
+        const LEASH_RADIUS = 8;
+        const distFromHome = params.clusterCenter.length();
+        if (distFromHome > LEASH_RADIUS) {
+            const pull = params.clusterCenter.clone().normalize()
+                .multiplyScalar(-(distFromHome - LEASH_RADIUS) * 2.0 * dt);
+            params.clusterVelocity.add(pull);
+        }
+
+        params.clusterVelocity.multiplyScalar(Math.pow(0.99, dt * 60));
+        params.clusterCenter.add(params.clusterVelocity.clone().multiplyScalar(dt));
+
+        // The net follows the hive.
+        if (this.netMesh) {
+            this.netMesh.position.copy(params.clusterCenter);
+            this.netMesh.scale.setScalar(params.netRadius || 12);
+        }
     }
 
     animate() {
@@ -430,6 +509,7 @@ class App {
         this.lastTime = currentTime;
 
         if (this.particleSystem) {
+            this.updateCluster(deltaTime);
             this.particleSystem.update(deltaTime);
         }
 
