@@ -17,6 +17,13 @@ export default class Particle {
         this.clearStartLife = null;
         this.particleParams = particleParams;
         this.isAffectedByInteraction = false; // New flag for Glitch mode
+        // Hornet escape attempts: a random direction, re-picked every
+        // 0.4-1.2s, so each hornet keeps trying a new way out on its own.
+        this.escapeDir = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+        this.escapeTimer = 0.4 + Math.random() * 0.8;
+        // Tether neighbours, recomputed by app.js (nearest 5-7, breaking
+        // and reattaching over time). References to other Particle objects.
+        this.tetherNeighbors = [];
     }
 
     update(deltaTime) {
@@ -43,14 +50,20 @@ export default class Particle {
             case 'glitch': {
                 // Falls back to the origin so stream.js, which carries no cluster
                 // state, keeps working exactly as before.
-                const center = this.particleParams.clusterCenter || ZERO_CENTER;
+                // PLAYGROUND v2: the swarm LEADS. swarmCenter is the centroid
+                // computed from the particles themselves (app.js, after the
+                // last update), never a leader the particles chase. There is
+                // deliberately NO pull toward a center here — that pull was
+                // the "particles chase the sphere" bug.
+                const center = this.particleParams.swarmCenter || this.particleParams.clusterCenter || ZERO_CENTER;
                 const netRadius = this.particleParams.netRadius;
 
                 if (netRadius !== undefined) {
-                    // HORNET BAG (playground only): the swarm is seeded inside
-                    // the net at mode switch (see app.js) and never spawned by
-                    // clicks. Every hornet constantly tests the mesh in all
-                    // directions, bounces off the wall, and gets shoved back in.
+                    // HORNET SWARM v2 (playground only): seeded at mode switch,
+                    // never spawned by clicks. Each hornet constantly tries to
+                    // break free in a random direction, is tethered to its
+                    // nearest neighbours, and bounces off an invisible blob
+                    // boundary that follows the swarm, not the other way round.
                     const toCenter = new THREE.Vector3().copy(center).sub(this.position);
                     const distFromCenter = toCenter.length();
                     const outward = distFromCenter > 0.0001
@@ -58,38 +71,74 @@ export default class Particle {
                         : new THREE.Vector3(1, 0, 0);
                     const jitter = this.particleParams.glitchJitter || 1;
 
-                    // Angry buzz: erratic per-hornet sine + random kicks, strong
-                    // enough to actually cross the bag, not just tremble in place.
+                    // 1. Escape attempts: a fresh random direction every
+                    // 0.4-1.2s, plus a constant push along it, with no input.
+                    // This is the "trying to get out, all directions, always"
+                    // motion, not a tremble around a center.
+                    this.escapeTimer -= deltaTime;
+                    if (this.escapeTimer <= 0) {
+                        this.escapeDir.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+                        this.escapeTimer = 0.4 + Math.random() * 0.8;
+                    }
+                    const escapeStrength = this.particleParams.escapeStrength || (jitter * 4);
+                    this.velocity.add(this.escapeDir.clone().multiplyScalar(escapeStrength * deltaTime));
+
+                    // Angry buzz: erratic per-hornet sine + random kicks.
                     const buzz = jitter * deltaTime * 8;
                     this.velocity.x += (Math.sin(time * 3.1 + this.turbulenceOffset) + (Math.random() - 0.5) * 2) * buzz;
                     this.velocity.y += (Math.cos(time * 2.7 + this.turbulenceOffset * 1.3) + (Math.random() - 0.5) * 2) * buzz;
                     this.velocity.z += (Math.sin(time * 3.7 + this.turbulenceOffset * 0.7) + (Math.random() - 0.5) * 2) * buzz;
 
-                    // Near the wall, hornets press outward harder: that is the
-                    // mesh-testing. The wall spring below shoves them back, so
-                    // they oscillate against the mesh instead of escaping.
-                    if (distFromCenter > netRadius * 0.75) {
-                        this.velocity.add(outward.clone().multiplyScalar(jitter * deltaTime * 4));
+                    // Occasional glitch spike: a sudden burst in a random
+                    // direction, so the swarm flickers angry even at rest.
+                    if (Math.random() < 0.002) {
+                        this.velocity.add(new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize().multiplyScalar(3));
                     }
 
-                    // Weak cohesion only: enough that the swarm follows the
-                    // bag when it is yanked, not enough to collapse it to a point.
-                    this.velocity.add(toCenter.multiplyScalar(this.particleParams.anchorStrength * 0.25 * deltaTime));
+                    // 2. Tethers: pull toward / push away from only the nearest
+                    // neighbours, with a rest length, so the swarm holds
+                    // together as chains, not as a collapse to a point and not
+                    // as everyone-to-everyone. Neighbour lists are recomputed
+                    // by app.js every ~0.6s, so chains break and reattach.
+                    const tetherStrength = this.particleParams.tetherStrength || 6;
+                    const restLength = this.particleParams.tetherRest || 1.3;
+                    if (this.tetherNeighbors) {
+                        for (let n = 0; n < this.tetherNeighbors.length; n++) {
+                            const nb = this.tetherNeighbors[n];
+                            if (!nb || !nb.position || nb === this) continue;
+                            const delta = new THREE.Vector3().copy(nb.position).sub(this.position);
+                            const d = delta.length();
+                            if (d < 0.0001) continue;
+                            const dir = delta.normalize();
+                            if (d > restLength) {
+                                this.velocity.add(dir.clone().multiplyScalar((d - restLength) * tetherStrength * deltaTime));
+                            } else if (d < restLength * 0.5) {
+                                this.velocity.add(dir.clone().multiplyScalar(-(restLength * 0.5 - d) * tetherStrength * deltaTime));
+                            }
+                        }
+                    }
 
-                    // The bag wall: spring back in, and kill outward velocity
-                    // so the hornet bounces off the mesh instead of leaking out.
-                    if (distFromCenter > netRadius) {
+                    // 3. Invisible blob boundary: the radius in a given
+                    // direction wobbles organically over time, so the wall is
+                    // not a perfect sphere. Hornets press outward, hit it,
+                    // bounce off, and pick a new escape direction.
+                    const dirX = outward.x, dirY = outward.y, dirZ = outward.z;
+                    let blobFactor = 1
+                        + 0.18 * Math.sin(dirX * 4 + time * 0.6)
+                        + 0.12 * Math.cos(dirY * 5 - time * 0.4)
+                        + 0.10 * Math.sin(dirZ * 3 + time * 0.8);
+                    blobFactor = Math.max(0.78, Math.min(1.22, blobFactor));
+                    const boundaryRadius = netRadius * blobFactor;
+                    if (distFromCenter > boundaryRadius) {
                         const backInside = new THREE.Vector3().copy(center).sub(this.position).normalize()
-                            .multiplyScalar((distFromCenter - netRadius) * NET_STRENGTH * deltaTime);
+                            .multiplyScalar((distFromCenter - boundaryRadius) * NET_STRENGTH * deltaTime);
                         this.velocity.add(backInside);
                         const outwardSpeed = this.velocity.dot(outward);
                         if (outwardSpeed > 0) {
                             this.velocity.add(outward.clone().multiplyScalar(-outwardSpeed * 0.9));
                         }
-                        // Extreme safety only: a lag spike must never let a
-                        // hornet end up far outside the bag.
-                        if (distFromCenter > netRadius * 1.5) {
-                            this.position.copy(center).add(outward.multiplyScalar(netRadius));
+                        if (distFromCenter > boundaryRadius * 1.5) {
+                            this.position.copy(center).add(outward.multiplyScalar(boundaryRadius));
                         }
                     }
                 } else {
@@ -101,7 +150,17 @@ export default class Particle {
                     this.velocity.z += (Math.random() - 0.5) * this.particleParams.glitchJitter * deltaTime;
                 }
 
-                // Damping (frame-rate independent: 0.92 ~= per-frame at 60fps)
+                // Speed cap for the bag only: angry, not exploding.
+                if (netRadius !== undefined) {
+                    const maxSpeed = this.particleParams.maxSpeed || 11;
+                    const speed = this.velocity.length();
+                    if (speed > maxSpeed) {
+                        this.velocity.multiplyScalar(maxSpeed / speed);
+                    }
+                }
+
+                // Damping (frame-rate independent: 0.96 in glitch v2, so
+                // motion persists longer than the old 0.92 tremble)
                 this.velocity.multiplyScalar(Math.pow(this.particleParams.damping, deltaTime * 60));
 
                 break;

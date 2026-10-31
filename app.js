@@ -81,28 +81,36 @@ class App {
         this.glitchParams = {
             ...this.zenParams,
             anchorStrength: 0.5,
-            damping: 0.92,
+            damping: 0.96,
             glitchJitter: 3.0,
             influenceRadius: 15,
             snapSpeed: 6.0,
-            // Net-hive state: the hive lives inside netRadius of clusterCenter.
-            // The swarm is SEEDED when glitch mode is entered (see
-            // seedGlitchSwarm) and is never spawned by clicks. A click yanks
-            // attractCount hornets from the click's side, and that yank drags
-            // the whole cluster by clusterDrift; gravity (scaled by
-            // clusterGravity) still sags the cluster over time.
-            // netRadius 4.5, not 12: at camera distance 15 a radius-12 bag
-            // filled the whole screen. 4.5 reads as a bag, not a skybox.
+            // SWARM v2: particles LEAD, mesh FOLLOWS. swarmCenter is not a
+            // target — it is the centroid computed from the particles
+            // themselves each frame (see updateSwarm). There is no center
+            // pull in particle.js bag mode anymore; that pull was the
+            // "particles chase the sphere" bug. A click yanks only the
+            // nearest hornets, and neighbour tethers drag the rest.
             netRadius: 4.5,
             swarmCount: 900,
             attractCount: 8,
+            tetherCount: 6,
+            tetherStrength: 6,
+            tetherRest: 1.3,
+            escapeStrength: 10,
+            maxSpeed: 11,
+            netOpacity: 0.15,
+            // Legacy, no longer drives movement in v2 (kept so old saved
+            // params / stream fallback references do not break).
             clusterDrift: 2.0,
             clusterGravity: 1.0,
             clusterCenter: new THREE.Vector3(),
             clusterVelocity: new THREE.Vector3(),
+            swarmCenter: new THREE.Vector3(),
             mode: 'glitch',
             zenMode: false,
         };
+        this.tetherTimer = 0;
         
         this.particleParams = this.zenParams;
     }
@@ -121,12 +129,27 @@ class App {
         this.particleSystem = new ParticleSystem(this.scene, this.particleParams);
         this.scene.add(this.createGradientSphere());
 
-        // The net: a wireframe sphere around the hive, only in glitch mode.
-        // Denser mesh + stronger opacity than the first pass so it reads as
-        // a bag, not a faint halo. Its world radius is netRadius (scaled in
-        // updateCluster), so it must match the physics radius exactly.
-        const netGeometry = new THREE.SphereGeometry(1, 24, 18);
-        const netMaterial = new THREE.LineBasicMaterial({ color: 0xC13E1B, transparent: true, opacity: 0.22 });
+        // The mesh v2: an ORGANIC BLOB, not a perfect sphere. Vertices are
+        // displaced by direction-based noise, so the wireframe is lumpy
+        // before any scaling. In animate it is positioned at the swarm
+        // centroid and scaled to hug the swarm's actual extent, so it
+        // follows the particles and never leads them.
+        const netGeometry = new THREE.SphereGeometry(1, 28, 20);
+        {
+            const pos = netGeometry.attributes.position;
+            for (let i = 0; i < pos.count; i++) {
+                const vx = pos.getX(i), vy = pos.getY(i), vz = pos.getZ(i);
+                const len = Math.sqrt(vx * vx + vy * vy + vz * vz) || 1;
+                const dx = vx / len, dy = vy / len, dz = vz / len;
+                const disp = 1
+                    + 0.18 * Math.sin(dx * 3 + 1.7) * Math.sin(dy * 4 + 0.5)
+                    + 0.12 * Math.cos(dz * 5 + 2.0)
+                    + 0.08 * Math.sin(dy * 6 + dx * 2);
+                pos.setXYZ(i, vx * disp, vy * disp, vz * disp);
+            }
+            pos.needsUpdate = true;
+        }
+        const netMaterial = new THREE.LineBasicMaterial({ color: 0xC13E1B, transparent: true, opacity: 0.15 });
         this.netMesh = new THREE.LineSegments(new THREE.WireframeGeometry(netGeometry), netMaterial);
         this.netMesh.visible = false;
         this.scene.add(this.netMesh);
@@ -154,6 +177,8 @@ class App {
                 // Fresh hive every time you enter glitch mode: centered, at rest.
                 this.glitchParams.clusterCenter.set(0, 0, 0);
                 this.glitchParams.clusterVelocity.set(0, 0, 0);
+                this.glitchParams.swarmCenter.set(0, 0, 0);
+                this.tetherTimer = 1; // force an immediate tether build
                 // this.activeSynth = this.glitchSynth; // Commented out
                 break;
             case 'zen':
@@ -179,10 +204,10 @@ class App {
         }
     }
 
-    // Random point uniformly inside the net sphere around the cluster center.
+    // Random point uniformly inside the net sphere around the swarm center.
     randomPointInNet() {
         const params = this.glitchParams;
-        const center = params.clusterCenter || new THREE.Vector3();
+        const center = params.swarmCenter || new THREE.Vector3();
         const radius = params.netRadius || 4.5;
         const r = radius * Math.cbrt(Math.random());
         const theta = Math.random() * Math.PI * 2;
@@ -490,14 +515,16 @@ class App {
         if (!this.particleSystem || this.physicsMode !== 'glitch') return;
 
         const params = this.particleParams;
-        const center = params.clusterCenter || new THREE.Vector3();
+        // Seen from the SWARM CENTROID (particles themselves), not from a
+        // leader center. The centroid is updated every frame in updateSwarm.
+        const center = params.swarmCenter || new THREE.Vector3();
         const influenceRadiusSq = params.influenceRadius * params.influenceRadius;
 
-        // Which side of the net the click is on, seen from the cluster center.
+        // Which side of the swarm the click is on, seen from the centroid.
         const sideDir = target.clone().sub(center);
 
-        // A few, not the swarm: only particles on the click's side of the hive
-        // and inside the influence radius, nearest to the click first.
+        // A few, not the swarm: only particles on the click's side and
+        // inside the influence radius, nearest to the click first.
         const candidates = [];
         this.particleSystem.particles.forEach(particle => {
             const distSq = particle.position.distanceToSquared(target);
@@ -510,55 +537,119 @@ class App {
         });
         candidates.sort((a, b) => a.distSq - b.distSq);
         const few = candidates.slice(0, Math.max(1, Math.round(params.attractCount || 8)));
-        // Yank, not nudge: the few nearest hornets get a hard impulse toward
-        // the click (2x snapSpeed, default 12), so they visibly haul toward
-        // it instead of drifting a pixel and falling back.
+        // Yank the PARTICLES, not a sphere: hard impulse toward the click,
+        // plus a sustained escape-direction toward the click for ~0.5s, so
+        // the yanked hornets keep hauling and their tethers drag the rest.
+        // Deliberately NO clusterVelocity nudge anymore — moving a center
+        // first was exactly the "sphere moves, particles chase it" bug.
         few.forEach(({ particle }) => {
-            const force = target.clone().sub(particle.position).normalize().multiplyScalar((params.snapSpeed || 6) * 2);
-            particle.velocity.add(force);
+            const dir = target.clone().sub(particle.position).normalize();
+            particle.velocity.add(dir.clone().multiplyScalar((params.snapSpeed || 6) * 2));
+            if (particle.escapeDir) {
+                particle.escapeDir.copy(dir);
+                particle.escapeTimer = 0.5;
+            }
             particle.isAffectedByInteraction = true;
         });
+    }
 
-        // The yank drags the whole cluster toward the click. clusterDrift is
-        // now 2.0 by default (was 0.5, which is why the swarm barely moved).
-        // Gravity in updateCluster still sags it over time, and the leash
-        // still keeps it on screen.
-        if (sideDir.lengthSq() > 0.0001 && params.clusterVelocity) {
-            const nudge = sideDir.clone().normalize().multiplyScalar(params.clusterDrift || 2.0);
-            params.clusterVelocity.add(nudge);
+    // Centroid of the current swarm, or null if there is no swarm yet.
+    computeSwarmCentroid() {
+        if (!this.particleSystem || this.particleSystem.particles.length === 0) return null;
+        const sum = new THREE.Vector3();
+        this.particleSystem.particles.forEach(p => sum.add(p.position));
+        return sum.multiplyScalar(1 / this.particleSystem.particles.length);
+    }
+
+    // Rebuild neighbour tethers: for each hornet, its nearest tetherCount
+    // neighbours. Rebuilt every ~0.6s, so chains break and reattach as the
+    // swarm churns. O(n^2) with a tiny top-k insertion, not a full sort
+    // per particle, and only on a timer, not every frame.
+    recomputeTethers() {
+        if (!this.particleSystem) return;
+        const particles = this.particleSystem.particles;
+        const k = Math.max(3, Math.round(this.glitchParams.tetherCount || 6));
+        for (let i = 0; i < particles.length; i++) {
+            const pi = particles[i];
+            const best = []; // [{p, dSq}] ascending
+            for (let j = 0; j < particles.length; j++) {
+                if (i === j) continue;
+                const dSq = pi.position.distanceToSquared(particles[j].position);
+                let at = 0;
+                while (at < best.length && best[at].dSq < dSq) at++;
+                if (at < k) {
+                    best.splice(at, 0, { p: particles[j], dSq });
+                    if (best.length > k) best.pop();
+                }
+            }
+            pi.tetherNeighbors = best.map(b => b.p);
         }
     }
 
-    updateCluster(deltaTime) {
+    // Physics-side swarm update, run BEFORE particleSystem.update: refresh
+    // the centroid (the physics boundary center), rebuild tethers on a
+    // timer, and apply a soft leash to the PARTICLES themselves if the
+    // whole swarm has drifted too far from home. Nothing here moves a
+    // leader sphere; the mesh is drawn after the particles move.
+    updateSwarm(deltaTime) {
         if (this.physicsMode !== 'glitch') return;
         const params = this.particleParams;
-        if (!params.clusterCenter || !params.clusterVelocity) return;
-
+        if (!params.swarmCenter || !this.particleSystem) return;
         const dt = Math.min(deltaTime, 0.05);
 
-        // Gravity dominates the cluster: a steady pull, while click nudges are
-        // small one-off impulses. Uses the panel's gravity value, scaled.
-        params.clusterVelocity.y += (params.gravity || 0) * (params.clusterGravity || 1) * dt;
-
-        // Leash: a gentle spring toward home so the hive can sag and drift but
-        // never wander off-screen entirely. 6, not 8: with a 4.5-radius bag,
-        // a center at 8 would push the bag's far edge to 12.5 from origin.
-        const LEASH_RADIUS = 6;
-        const distFromHome = params.clusterCenter.length();
-        if (distFromHome > LEASH_RADIUS) {
-            const pull = params.clusterCenter.clone().normalize()
-                .multiplyScalar(-(distFromHome - LEASH_RADIUS) * 2.0 * dt);
-            params.clusterVelocity.add(pull);
+        const centroid = this.computeSwarmCentroid();
+        if (centroid) {
+            params.swarmCenter.copy(centroid);
+            // Leash on the particles, not on a center object.
+            const LEASH_RADIUS = 6;
+            const distFromHome = centroid.length();
+            if (distFromHome > LEASH_RADIUS) {
+                const pull = centroid.clone().normalize()
+                    .multiplyScalar(-(distFromHome - LEASH_RADIUS) * 1.0 * dt);
+                this.particleSystem.particles.forEach(p => p.velocity.add(pull));
+            }
         }
 
-        params.clusterVelocity.multiplyScalar(Math.pow(0.99, dt * 60));
-        params.clusterCenter.add(params.clusterVelocity.clone().multiplyScalar(dt));
-
-        // The net follows the hive, at exactly the physics radius.
-        if (this.netMesh) {
-            this.netMesh.position.copy(params.clusterCenter);
-            this.netMesh.scale.setScalar(params.netRadius || 4.5);
+        this.tetherTimer += dt;
+        if (this.tetherTimer >= 0.6) {
+            this.tetherTimer = 0;
+            this.recomputeTethers();
         }
+    }
+
+    // Visual-side swarm update, run AFTER particleSystem.update: the blob
+    // mesh follows the particles. Position = new centroid, scale = hug
+    // the swarm's actual extent, slow rotation for organic morphing.
+    // This is why the mesh can never lead: it is drawn from where the
+    // particles already are.
+    updateSwarmMeshVisual(deltaTime) {
+        if (this.physicsMode !== 'glitch' || !this.netMesh) return;
+        const params = this.particleParams;
+        const centroid = this.computeSwarmCentroid();
+        if (!centroid) return;
+        if (params.swarmCenter) params.swarmCenter.copy(centroid);
+
+        let maxDist = 0;
+        this.particleSystem.particles.forEach(p => {
+            const d = p.position.distanceTo(centroid);
+            if (d > maxDist) maxDist = d;
+        });
+        const meshRadius = Math.max(
+            (params.netRadius || 4.5) * 0.7,
+            Math.min(maxDist * 1.05, (params.netRadius || 4.5) * 1.3)
+        );
+        this.netMesh.position.copy(centroid);
+        this.netMesh.scale.setScalar(meshRadius);
+        this.netMesh.rotation.y += deltaTime * 0.25;
+        this.netMesh.rotation.x += deltaTime * 0.12;
+        if (this.netMesh.material) {
+            this.netMesh.material.opacity = params.netOpacity !== undefined ? params.netOpacity : 0.15;
+        }
+    }
+
+    // Backwards-compatible name, now just the visual step.
+    updateCluster(deltaTime) {
+        this.updateSwarmMeshVisual(deltaTime);
     }
 
     animate() {
@@ -571,9 +662,12 @@ class App {
         this.lastTime = currentTime;
 
         if (this.particleSystem) {
-            this.updateCluster(deltaTime);
+            // Particles first: centroid + tethers for physics, then move
+            // the particles, then draw the mesh from their new positions.
+            this.updateSwarm(deltaTime);
             this.maintainGlitchSwarm();
             this.particleSystem.update(deltaTime);
+            this.updateSwarmMeshVisual(deltaTime);
         }
 
         this.frameCount = (this.frameCount || 0) + 1;
