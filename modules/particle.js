@@ -91,20 +91,25 @@ export default class Particle {
                         }
                     }
                     const baseEscape = this.particleParams.escapeStrength || (jitter * 4);
-                    const escapeStrength = this.clickTimer > 0 ? baseEscape * 2.5 : baseEscape;
+                    // v5: during a yank, non-yanked hornets quiet their
+                    // random escape (0.3x) so random motion does not cancel
+                    // the directional pull, while yanked hornets keep the
+                    // strong escape toward the click. v4's weak global pull
+                    // (3) was drowned out by random escape (10) — that is
+                    // why the swarm stayed centered.
+                    let escapeStrength;
+                    if (this.clickTimer > 0) escapeStrength = baseEscape * 2.5;
+                    else if (this.particleParams.yankActive) escapeStrength = baseEscape * 0.3;
+                    else escapeStrength = baseEscape;
                     this.velocity.add(this.escapeDir.clone().multiplyScalar(escapeStrength * deltaTime));
 
-                    // v4 global yank pull: during a yank, EVERY hornet gets
-                    // a weak pull toward the click target, while the few
-                    // yanked hornets get the strong escape above. Without
-                    // this, the swarm could only deform inside a boundary
-                    // anchored to its old centroid and could never actually
-                    // translate across the field — which is why v3's far
-                    // click left the cluster in place.
+                    // v5 global yank pull: STRONG (20, was 3) toward the
+                    // click target for every hornet during a yank, so the
+                    // whole swarm actually translates, not just deforms.
                     if (this.particleParams.yankActive && this.particleParams.yankTarget) {
                         const toYank = new THREE.Vector3().copy(this.particleParams.yankTarget).sub(this.position);
                         if (toYank.lengthSq() > 0.0001) {
-                            this.velocity.add(toYank.normalize().multiplyScalar(3 * deltaTime));
+                            this.velocity.add(toYank.normalize().multiplyScalar(20 * deltaTime));
                         }
                     }
 

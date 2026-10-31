@@ -158,6 +158,18 @@ class App {
         this.netMesh.visible = false;
         this.scene.add(this.netMesh);
 
+        // v5 click marker: a bright pink sphere at the click point, so a
+        // click is unmistakably visible even before the swarm moves, and
+        // so a failed click handler is diagnosable (no marker = no click
+        // registered). Fades over 2s in animate().
+        this.clickMarker = new THREE.Mesh(
+            new THREE.SphereGeometry(0.4, 16, 12),
+            new THREE.MeshBasicMaterial({ color: 0xFF2E7E, transparent: true, opacity: 0.9 })
+        );
+        this.clickMarker.visible = false;
+        this.clickMarkerTimer = 0;
+        this.scene.add(this.clickMarker);
+
         this.ui = new UI(this);
         this.ui.setupControls();
         
@@ -528,6 +540,17 @@ class App {
         // v4: remember the click target so every hornet can get a weak
         // pull toward it during the yank (see particle.js yank pull).
         params.yankTarget = target.clone();
+        // v5 click marker, always shown on a glitch click.
+        if (this.clickMarker) {
+            this.clickMarker.position.copy(target);
+            this.clickMarker.visible = true;
+            this.clickMarkerTimer = 2.0;
+            this.clickMarker.material.opacity = 0.9;
+            this.clickMarker.scale.setScalar(1);
+        }
+        if (this.netMesh) {
+            this.netMesh.visible = true;
+        }
         const candidates = [];
         this.particleSystem.particles.forEach(particle => {
             candidates.push({ particle, distSq: particle.position.distanceToSquared(target) });
@@ -546,9 +569,9 @@ class App {
             particle.velocity.add(dir.clone().multiplyScalar((params.snapSpeed || 6) * 3));
             if (particle.escapeDir) {
                 particle.escapeDir.copy(dir);
-                particle.escapeTimer = 3.0;
+                particle.escapeTimer = 5.0;
             }
-            particle.clickTimer = 3.0;
+            particle.clickTimer = 5.0;
             particle.isAffectedByInteraction = true;
         });
     }
@@ -597,9 +620,11 @@ class App {
         if (!params.swarmCenter || !this.particleSystem) return;
         const dt = Math.min(deltaTime, 0.05);
 
-        // v4 yank state, set BEFORE particle update so particle.js can
-        // use it this frame: active for 3s after a click.
-        params.yankActive = this.lastGlitchClickTime ? (Date.now() - this.lastGlitchClickTime < 3000) : false;
+        // v5 yank state, set BEFORE particle update so particle.js can
+        // use it this frame: active for 5s after a click, long enough to
+        // translate at low FPS (the v4 3s window expired before the swarm
+        // could visibly move at 4-6 FPS).
+        params.yankActive = this.lastGlitchClickTime ? (Date.now() - this.lastGlitchClickTime < 5000) : false;
 
         const centroid = this.computeSwarmCentroid();
         if (centroid) {
@@ -663,11 +688,7 @@ class App {
         // despite opacity 0. Now only yankActive / a recent click shows it.
         if (this.netMesh.material) {
             const baseOpacity = params.netOpacity !== undefined ? params.netOpacity : 0;
-            let opacity = baseOpacity;
-            const sinceClick = this.lastGlitchClickTime ? (Date.now() - this.lastGlitchClickTime) / 1000 : 999;
-            if (sinceClick < 3) {
-                opacity = Math.max(opacity, baseOpacity + (0.35 - baseOpacity) * (1 - sinceClick / 3));
-            }
+            const opacity = params.yankActive ? Math.max(baseOpacity, 0.5) : baseOpacity;
             this.netMesh.material.opacity = opacity;
             this.netMesh.visible = opacity > 0.01;
         }
@@ -694,6 +715,16 @@ class App {
             this.maintainGlitchSwarm();
             this.particleSystem.update(deltaTime);
             this.updateSwarmMeshVisual(deltaTime);
+        }
+
+        // Click marker fade: expand slightly and fade over 2s, then hide.
+        if (this.clickMarker && this.clickMarkerTimer > 0) {
+            this.clickMarkerTimer -= deltaTime;
+            this.clickMarker.scale.setScalar(1 + (2.0 - Math.max(0, this.clickMarkerTimer)) * 0.5);
+            this.clickMarker.material.opacity = Math.max(0, this.clickMarkerTimer / 2.0) * 0.9;
+            if (this.clickMarkerTimer <= 0) {
+                this.clickMarker.visible = false;
+            }
         }
 
         this.frameCount = (this.frameCount || 0) + 1;
