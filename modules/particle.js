@@ -21,6 +21,11 @@ export default class Particle {
         // 0.4-1.2s, so each hornet keeps trying a new way out on its own.
         this.escapeDir = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
         this.escapeTimer = 0.4 + Math.random() * 0.8;
+        // Click boost: set by app.js when this hornet is one of the few
+        // yanked toward a click. While it runs, this hornet can break
+        // away from the swarm (expanded boundary, weaker tethers, faster
+        // escape) so the rest get visibly dragged after it.
+        this.clickTimer = 0;
         // Tether neighbours, recomputed by app.js (nearest 5-7, breaking
         // and reattaching over time). References to other Particle objects.
         this.tetherNeighbors = [];
@@ -74,14 +79,26 @@ export default class Particle {
                     // 1. Escape attempts: a fresh random direction every
                     // 0.4-1.2s, plus a constant push along it, with no input.
                     // This is the "trying to get out, all directions, always"
-                    // motion, not a tremble around a center.
-                    this.escapeTimer -= deltaTime;
-                    if (this.escapeTimer <= 0) {
-                        this.escapeDir.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
-                        this.escapeTimer = 0.4 + Math.random() * 0.8;
+                    // motion, not a tremble around a center. A click-boosted
+                    // hornet does NOT re-pick randomly while its boost runs:
+                    // its escape direction is the click direction, held.
+                    if (this.clickTimer > 0) this.clickTimer -= deltaTime;
+                    if (this.clickTimer <= 0) {
+                        this.escapeTimer -= deltaTime;
+                        if (this.escapeTimer <= 0) {
+                            this.escapeDir.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+                            this.escapeTimer = 0.4 + Math.random() * 0.8;
+                        }
                     }
-                    const escapeStrength = this.particleParams.escapeStrength || (jitter * 4);
+                    const baseEscape = this.particleParams.escapeStrength || (jitter * 4);
+                    const escapeStrength = this.clickTimer > 0 ? baseEscape * 2.5 : baseEscape;
                     this.velocity.add(this.escapeDir.clone().multiplyScalar(escapeStrength * deltaTime));
+
+                    // Heartbeat, kept from v2 and made explicit: a slow
+                    // outward pulse (~0.7 Hz) that the tethers then pull
+                    // back in, so the swarm breathes even with no input.
+                    const heartbeat = Math.pow(Math.max(0, Math.sin(time * 4.5)), 2);
+                    this.velocity.add(outward.clone().multiplyScalar(heartbeat * deltaTime * 4));
 
                     // Angry buzz: erratic per-hornet sine + random kicks.
                     const buzz = jitter * deltaTime * 8;
@@ -100,7 +117,11 @@ export default class Particle {
                     // together as chains, not as a collapse to a point and not
                     // as everyone-to-everyone. Neighbour lists are recomputed
                     // by app.js every ~0.6s, so chains break and reattach.
-                    const tetherStrength = this.particleParams.tetherStrength || 6;
+                    // Click-boosted hornets stretch their tethers (half
+                    // strength) so they can actually pull away, then full
+                    // tether strength drags the rest after them.
+                    const baseTether = this.particleParams.tetherStrength || 6;
+                    const tetherStrength = this.clickTimer > 0 ? baseTether * 0.5 : baseTether;
                     const restLength = this.particleParams.tetherRest || 1.3;
                     if (this.tetherNeighbors) {
                         for (let n = 0; n < this.tetherNeighbors.length; n++) {
@@ -128,7 +149,10 @@ export default class Particle {
                         + 0.12 * Math.cos(dirY * 5 - time * 0.4)
                         + 0.10 * Math.sin(dirZ * 3 + time * 0.8);
                     blobFactor = Math.max(0.78, Math.min(1.22, blobFactor));
-                    const boundaryRadius = netRadius * blobFactor;
+                    // Click-boosted hornets get a doubled boundary, or they
+                    // could never break away at all — the wall would bounce
+                    // them back before the tethers could drag the swarm.
+                    const boundaryRadius = netRadius * blobFactor * (this.clickTimer > 0 ? 2.0 : 1.0);
                     if (distFromCenter > boundaryRadius) {
                         const backInside = new THREE.Vector3().copy(center).sub(this.position).normalize()
                             .multiplyScalar((distFromCenter - boundaryRadius) * NET_STRENGTH * deltaTime);
@@ -151,8 +175,11 @@ export default class Particle {
                 }
 
                 // Speed cap for the bag only: angry, not exploding.
+                // Click-boosted hornets get a higher cap so the yank is
+                // actually visible across the field.
                 if (netRadius !== undefined) {
-                    const maxSpeed = this.particleParams.maxSpeed || 11;
+                    const baseMax = this.particleParams.maxSpeed || 11;
+                    const maxSpeed = this.clickTimer > 0 ? baseMax * 1.8 : baseMax;
                     const speed = this.velocity.length();
                     if (speed > maxSpeed) {
                         this.velocity.multiplyScalar(maxSpeed / speed);

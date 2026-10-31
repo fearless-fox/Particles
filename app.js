@@ -99,7 +99,10 @@ class App {
             tetherRest: 1.3,
             escapeStrength: 10,
             maxSpeed: 11,
-            netOpacity: 0.15,
+            // Mesh is INVISIBLE by default in v3: the user only wants to
+            // see the confinement when the few pull away and stretch it.
+            // updateSwarmMeshVisual raises opacity during a yank.
+            netOpacity: 0,
             // Legacy, no longer drives movement in v2 (kept so old saved
             // params / stream fallback references do not break).
             clusterDrift: 2.0,
@@ -111,6 +114,7 @@ class App {
             zenMode: false,
         };
         this.tetherTimer = 0;
+        this.lastGlitchClickTime = 0;
         
         this.particleParams = this.zenParams;
     }
@@ -149,7 +153,7 @@ class App {
             }
             pos.needsUpdate = true;
         }
-        const netMaterial = new THREE.LineBasicMaterial({ color: 0xC13E1B, transparent: true, opacity: 0.15 });
+        const netMaterial = new THREE.LineBasicMaterial({ color: 0xC13E1B, transparent: true, opacity: 0 });
         this.netMesh = new THREE.LineSegments(new THREE.WireframeGeometry(netGeometry), netMaterial);
         this.netMesh.visible = false;
         this.scene.add(this.netMesh);
@@ -515,40 +519,32 @@ class App {
         if (!this.particleSystem || this.physicsMode !== 'glitch') return;
 
         const params = this.particleParams;
-        // Seen from the SWARM CENTROID (particles themselves), not from a
-        // leader center. The centroid is updated every frame in updateSwarm.
-        const center = params.swarmCenter || new THREE.Vector3();
-        const influenceRadiusSq = params.influenceRadius * params.influenceRadius;
-
-        // Which side of the swarm the click is on, seen from the centroid.
-        const sideDir = target.clone().sub(center);
-
-        // A few, not the swarm: only particles on the click's side and
-        // inside the influence radius, nearest to the click first.
+        // v3: a click is seen ACROSS THE WHOLE FIELD. No influence-radius
+        // cutoff and no side filter anymore — those were why clicks far
+        // from the swarm did nothing. The few nearest hornets to the click
+        // point, wherever the swarm is, are the ones that break away.
+        this.lastGlitchClickTime = Date.now();
         const candidates = [];
         this.particleSystem.particles.forEach(particle => {
-            const distSq = particle.position.distanceToSquared(target);
-            if (distSq >= influenceRadiusSq) return;
-            if (sideDir.lengthSq() > 0.0001) {
-                const toParticle = particle.position.clone().sub(center);
-                if (toParticle.dot(sideDir) <= 0) return;
-            }
-            candidates.push({ particle, distSq });
+            candidates.push({ particle, distSq: particle.position.distanceToSquared(target) });
         });
         candidates.sort((a, b) => a.distSq - b.distSq);
         const few = candidates.slice(0, Math.max(1, Math.round(params.attractCount || 8)));
-        // Yank the PARTICLES, not a sphere: hard impulse toward the click,
-        // plus a sustained escape-direction toward the click for ~0.5s, so
-        // the yanked hornets keep hauling and their tethers drag the rest.
-        // Deliberately NO clusterVelocity nudge anymore — moving a center
-        // first was exactly the "sphere moves, particles chase it" bug.
+        // Yank the PARTICLES, hard and held: impulse 3x snapSpeed (default
+        // 18, with the click-boost speed cap in particle.js), plus a
+        // sustained escape-direction toward the click for 1.5s, plus a
+        // clickTimer that lets them stretch their tethers and break the
+        // boundary before the rest get dragged after them.
         few.forEach(({ particle }) => {
-            const dir = target.clone().sub(particle.position).normalize();
-            particle.velocity.add(dir.clone().multiplyScalar((params.snapSpeed || 6) * 2));
+            const dir = target.clone().sub(particle.position);
+            if (dir.lengthSq() < 0.0001) return;
+            dir.normalize();
+            particle.velocity.add(dir.clone().multiplyScalar((params.snapSpeed || 6) * 3));
             if (particle.escapeDir) {
                 particle.escapeDir.copy(dir);
-                particle.escapeTimer = 0.5;
+                particle.escapeTimer = 1.5;
             }
+            particle.clickTimer = 1.5;
             particle.isAffectedByInteraction = true;
         });
     }
@@ -642,8 +638,24 @@ class App {
         this.netMesh.scale.setScalar(meshRadius);
         this.netMesh.rotation.y += deltaTime * 0.25;
         this.netMesh.rotation.x += deltaTime * 0.12;
+        // Mesh visibility v3: invisible by default (slider netOpacity,
+        // default 0). It only appears when the few pull away: for 3s
+        // after a click it fades in to 0.35 and back out, and it also
+        // shows while the swarm is stretched past its normal radius.
+        // That is the "see the confinement only when it is being yanked"
+        // rule, not a mesh that is always on display.
         if (this.netMesh.material) {
-            this.netMesh.material.opacity = params.netOpacity !== undefined ? params.netOpacity : 0.15;
+            const baseOpacity = params.netOpacity !== undefined ? params.netOpacity : 0;
+            let opacity = baseOpacity;
+            const sinceClick = this.lastGlitchClickTime ? (Date.now() - this.lastGlitchClickTime) / 1000 : 999;
+            if (sinceClick < 3) {
+                opacity = Math.max(opacity, baseOpacity + (0.35 - baseOpacity) * (1 - sinceClick / 3));
+            }
+            if (maxDist > (params.netRadius || 4.5) * 0.95) {
+                opacity = Math.max(opacity, 0.20);
+            }
+            this.netMesh.material.opacity = opacity;
+            this.netMesh.visible = opacity > 0.01;
         }
     }
 
