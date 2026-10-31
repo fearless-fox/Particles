@@ -182,6 +182,7 @@ class App {
                 this.glitchParams.clusterCenter.set(0, 0, 0);
                 this.glitchParams.clusterVelocity.set(0, 0, 0);
                 this.glitchParams.swarmCenter.set(0, 0, 0);
+                this.meshScaleSmooth = undefined;
                 this.tetherTimer = 1; // force an immediate tether build
                 // this.activeSynth = this.glitchSynth; // Commented out
                 break;
@@ -524,6 +525,9 @@ class App {
         // from the swarm did nothing. The few nearest hornets to the click
         // point, wherever the swarm is, are the ones that break away.
         this.lastGlitchClickTime = Date.now();
+        // v4: remember the click target so every hornet can get a weak
+        // pull toward it during the yank (see particle.js yank pull).
+        params.yankTarget = target.clone();
         const candidates = [];
         this.particleSystem.particles.forEach(particle => {
             candidates.push({ particle, distSq: particle.position.distanceToSquared(target) });
@@ -542,9 +546,9 @@ class App {
             particle.velocity.add(dir.clone().multiplyScalar((params.snapSpeed || 6) * 3));
             if (particle.escapeDir) {
                 particle.escapeDir.copy(dir);
-                particle.escapeTimer = 1.5;
+                particle.escapeTimer = 3.0;
             }
-            particle.clickTimer = 1.5;
+            particle.clickTimer = 3.0;
             particle.isAffectedByInteraction = true;
         });
     }
@@ -593,13 +597,20 @@ class App {
         if (!params.swarmCenter || !this.particleSystem) return;
         const dt = Math.min(deltaTime, 0.05);
 
+        // v4 yank state, set BEFORE particle update so particle.js can
+        // use it this frame: active for 3s after a click.
+        params.yankActive = this.lastGlitchClickTime ? (Date.now() - this.lastGlitchClickTime < 3000) : false;
+
         const centroid = this.computeSwarmCentroid();
         if (centroid) {
             params.swarmCenter.copy(centroid);
-            // Leash on the particles, not on a center object.
-            const LEASH_RADIUS = 6;
+            // Leash on the particles, not on a center object. Skipped
+            // during a yank (it would fight the translation), and radius
+            // widened to 10 so the swarm can actually travel across the
+            // field instead of being pinned near home.
+            const LEASH_RADIUS = 10;
             const distFromHome = centroid.length();
-            if (distFromHome > LEASH_RADIUS) {
+            if (!params.yankActive && distFromHome > LEASH_RADIUS) {
                 const pull = centroid.clone().normalize()
                     .multiplyScalar(-(distFromHome - LEASH_RADIUS) * 1.0 * dt);
                 this.particleSystem.particles.forEach(p => p.velocity.add(pull));
@@ -630,29 +641,32 @@ class App {
             const d = p.position.distanceTo(centroid);
             if (d > maxDist) maxDist = d;
         });
-        const meshRadius = Math.max(
+        // v4 mesh scale: capped at 1.15x netRadius (was 1.3x) and
+        // smoothed toward its target, so it cannot balloon 3x in one
+        // frame when a few hornets stretch out. Snug, not popping.
+        const targetRadius = Math.max(
             (params.netRadius || 4.5) * 0.7,
-            Math.min(maxDist * 1.05, (params.netRadius || 4.5) * 1.3)
+            Math.min(maxDist * 1.05, (params.netRadius || 4.5) * 1.15)
         );
+        if (this.meshScaleSmooth === undefined) this.meshScaleSmooth = targetRadius;
+        this.meshScaleSmooth += (targetRadius - this.meshScaleSmooth) * Math.min(1, deltaTime * 3);
         this.netMesh.position.copy(centroid);
-        this.netMesh.scale.setScalar(meshRadius);
+        this.netMesh.scale.setScalar(this.meshScaleSmooth);
         this.netMesh.rotation.y += deltaTime * 0.25;
         this.netMesh.rotation.x += deltaTime * 0.12;
-        // Mesh visibility v3: invisible by default (slider netOpacity,
-        // default 0). It only appears when the few pull away: for 3s
-        // after a click it fades in to 0.35 and back out, and it also
-        // shows while the swarm is stretched past its normal radius.
-        // That is the "see the confinement only when it is being yanked"
-        // rule, not a mesh that is always on display.
+        // Mesh visibility v4: invisible by default (slider netOpacity,
+        // default 0). It only appears during a yank: for 3s after a
+        // click it fades in to 0.35 and back out. REMOVED the v3
+        // "stretched past normal radius" trigger — that was the bug:
+        // hornets pressing against the wall keep maxDist above 0.95x
+        // netRadius almost always, so the mesh was visible at rest
+        // despite opacity 0. Now only yankActive / a recent click shows it.
         if (this.netMesh.material) {
             const baseOpacity = params.netOpacity !== undefined ? params.netOpacity : 0;
             let opacity = baseOpacity;
             const sinceClick = this.lastGlitchClickTime ? (Date.now() - this.lastGlitchClickTime) / 1000 : 999;
             if (sinceClick < 3) {
                 opacity = Math.max(opacity, baseOpacity + (0.35 - baseOpacity) * (1 - sinceClick / 3));
-            }
-            if (maxDist > (params.netRadius || 4.5) * 0.95) {
-                opacity = Math.max(opacity, 0.20);
             }
             this.netMesh.material.opacity = opacity;
             this.netMesh.visible = opacity > 0.01;

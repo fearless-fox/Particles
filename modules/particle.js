@@ -94,6 +94,20 @@ export default class Particle {
                     const escapeStrength = this.clickTimer > 0 ? baseEscape * 2.5 : baseEscape;
                     this.velocity.add(this.escapeDir.clone().multiplyScalar(escapeStrength * deltaTime));
 
+                    // v4 global yank pull: during a yank, EVERY hornet gets
+                    // a weak pull toward the click target, while the few
+                    // yanked hornets get the strong escape above. Without
+                    // this, the swarm could only deform inside a boundary
+                    // anchored to its old centroid and could never actually
+                    // translate across the field — which is why v3's far
+                    // click left the cluster in place.
+                    if (this.particleParams.yankActive && this.particleParams.yankTarget) {
+                        const toYank = new THREE.Vector3().copy(this.particleParams.yankTarget).sub(this.position);
+                        if (toYank.lengthSq() > 0.0001) {
+                            this.velocity.add(toYank.normalize().multiplyScalar(3 * deltaTime));
+                        }
+                    }
+
                     // Heartbeat, kept from v2 and made explicit: a slow
                     // outward pulse (~0.7 Hz) that the tethers then pull
                     // back in, so the swarm breathes even with no input.
@@ -149,10 +163,14 @@ export default class Particle {
                         + 0.12 * Math.cos(dirY * 5 - time * 0.4)
                         + 0.10 * Math.sin(dirZ * 3 + time * 0.8);
                     blobFactor = Math.max(0.78, Math.min(1.22, blobFactor));
-                    // Click-boosted hornets get a doubled boundary, or they
-                    // could never break away at all — the wall would bounce
-                    // them back before the tethers could drag the swarm.
-                    const boundaryRadius = netRadius * blobFactor * (this.clickTimer > 0 ? 2.0 : 1.0);
+                    // v4: during a yank the boundary doubles for EVERYONE,
+                    // not just the yanked few. A boundary anchored to the old
+                    // centroid would bounce the rest back before they could
+                    // follow the few into new space, so the swarm could
+                    // deform but never translate. Doubled for all during the
+                    // yank, normal again after, around the new centroid.
+                    const boundaryScale = (this.clickTimer > 0 || this.particleParams.yankActive) ? 2.0 : 1.0;
+                    const boundaryRadius = netRadius * blobFactor * boundaryScale;
                     if (distFromCenter > boundaryRadius) {
                         const backInside = new THREE.Vector3().copy(center).sub(this.position).normalize()
                             .multiplyScalar((distFromCenter - boundaryRadius) * NET_STRENGTH * deltaTime);
