@@ -82,16 +82,21 @@ class App {
             ...this.zenParams,
             anchorStrength: 0.5,
             damping: 0.92,
-            glitchJitter: 1.0,
+            glitchJitter: 3.0,
             influenceRadius: 15,
-            snapSpeed: 3.0,
-            // Net-hive state: the hive lives inside netRadius of clusterCenter,
-            // clicks attract attractCount particles from the click's side, each
-            // click nudges the cluster by clusterDrift, and gravity (scaled by
-            // clusterGravity) pulls the cluster far harder than any click does.
-            netRadius: 12,
+            snapSpeed: 6.0,
+            // Net-hive state: the hive lives inside netRadius of clusterCenter.
+            // The swarm is SEEDED when glitch mode is entered (see
+            // seedGlitchSwarm) and is never spawned by clicks. A click yanks
+            // attractCount hornets from the click's side, and that yank drags
+            // the whole cluster by clusterDrift; gravity (scaled by
+            // clusterGravity) still sags the cluster over time.
+            // netRadius 4.5, not 12: at camera distance 15 a radius-12 bag
+            // filled the whole screen. 4.5 reads as a bag, not a skybox.
+            netRadius: 4.5,
+            swarmCount: 900,
             attractCount: 8,
-            clusterDrift: 0.5,
+            clusterDrift: 2.0,
             clusterGravity: 1.0,
             clusterCenter: new THREE.Vector3(),
             clusterVelocity: new THREE.Vector3(),
@@ -116,9 +121,12 @@ class App {
         this.particleSystem = new ParticleSystem(this.scene, this.particleParams);
         this.scene.add(this.createGradientSphere());
 
-        // The net: a faint wireframe sphere around the hive, only in glitch mode.
-        const netGeometry = new THREE.SphereGeometry(1, 20, 14);
-        const netMaterial = new THREE.LineBasicMaterial({ color: 0xC13E1B, transparent: true, opacity: 0.10 });
+        // The net: a wireframe sphere around the hive, only in glitch mode.
+        // Denser mesh + stronger opacity than the first pass so it reads as
+        // a bag, not a faint halo. Its world radius is netRadius (scaled in
+        // updateCluster), so it must match the physics radius exactly.
+        const netGeometry = new THREE.SphereGeometry(1, 24, 18);
+        const netMaterial = new THREE.LineBasicMaterial({ color: 0xC13E1B, transparent: true, opacity: 0.22 });
         this.netMesh = new THREE.LineSegments(new THREE.WireframeGeometry(netGeometry), netMaterial);
         this.netMesh.visible = false;
         this.scene.add(this.netMesh);
@@ -161,8 +169,49 @@ class App {
         // Update particle system with new parameters
         this.particleSystem.particleParams = this.particleParams;
         // Re-initialize particle system to apply new parameters and clear old particles
-        this.particleSystem.clearParticles(); 
+        this.particleSystem.clearParticles();
         this.particleSystem.updateBlendMode();
+        // Glitch mode starts with a full swarm already trapped in the bag.
+        // Without this, the first click had to spawn the particles, which is
+        // exactly the "particles appear at click" bug the user reported.
+        if (mode === 'glitch') {
+            this.seedGlitchSwarm();
+        }
+    }
+
+    // Random point uniformly inside the net sphere around the cluster center.
+    randomPointInNet() {
+        const params = this.glitchParams;
+        const center = params.clusterCenter || new THREE.Vector3();
+        const radius = params.netRadius || 4.5;
+        const r = radius * Math.cbrt(Math.random());
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        return new THREE.Vector3(
+            center.x + r * Math.sin(phi) * Math.cos(theta),
+            center.y + r * Math.sin(phi) * Math.sin(theta),
+            center.z + r * Math.cos(phi)
+        );
+    }
+
+    seedGlitchSwarm(count) {
+        if (!this.particleSystem) return;
+        const target = count !== undefined ? count : (this.glitchParams.swarmCount || 900);
+        const missing = target - this.particleSystem.particles.length;
+        if (missing <= 0) return;
+        for (let i = 0; i < missing; i++) {
+            this.particleSystem.emit(1, this.randomPointInNet());
+        }
+    }
+
+    // Keep the swarm full as hornets age out (lifespan expiry). Topping up
+    // inside the net, never at a click point.
+    maintainGlitchSwarm() {
+        if (this.physicsMode !== 'glitch' || !this.particleSystem) return;
+        const target = this.glitchParams.swarmCount || 900;
+        if (this.particleSystem.particles.length < target) {
+            this.seedGlitchSwarm(target);
+        }
     }
 
     createGradientSphere() {
@@ -315,7 +364,10 @@ class App {
                 const deltaY = event.clientY - previousMouseY;
                 const moveDistance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
 
-                if (duration < 300 && moveDistance < 5) {
+                // Glitch mode: a click NEVER spawns. The swarm already exists
+                // (seeded at mode switch); a click only yanks it, via mousedown.
+                // Spawning here was the "particles appear at click" bug.
+                if (duration < 300 && moveDistance < 5 && this.physicsMode !== 'glitch') {
                     const worldPos = getWorldPosition(previousMouseX, previousMouseY);
                     if (this.particleSystem) {
                         this.particleSystem.emit(this.particleParams.burstSize, worldPos);
@@ -351,7 +403,10 @@ class App {
                 if (isDragging && event.touches.length === 1) {
                     const touch = event.touches[0];
                     const worldPos = getWorldPosition(touch.clientX, touch.clientY);
-                    emitAtPosition(worldPos);
+                    // No spawning in glitch mode on touch either (see mouseup).
+                    if (this.physicsMode !== 'glitch') {
+                        emitAtPosition(worldPos);
+                    }
 
                     if (Date.now() - lastNotePlaybackTime > 100) {
                         // if (this.activeSynth) { // Commented out
@@ -389,7 +444,8 @@ class App {
                     const deltaY = touch.clientY - previousMouseY;
                     const moveDistance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
 
-                    if (duration < 300 && moveDistance < 5) {
+                    // Glitch mode: a tap NEVER spawns (see mouseup).
+                    if (duration < 300 && moveDistance < 5 && this.physicsMode !== 'glitch') {
                         const worldPos = getWorldPosition(previousMouseX, previousMouseY);
                         if (this.particleSystem) {
                             this.particleSystem.emit(this.particleParams.burstSize, worldPos);
@@ -454,16 +510,21 @@ class App {
         });
         candidates.sort((a, b) => a.distSq - b.distSq);
         const few = candidates.slice(0, Math.max(1, Math.round(params.attractCount || 8)));
+        // Yank, not nudge: the few nearest hornets get a hard impulse toward
+        // the click (2x snapSpeed, default 12), so they visibly haul toward
+        // it instead of drifting a pixel and falling back.
         few.forEach(({ particle }) => {
-            const force = target.clone().sub(particle.position).normalize().multiplyScalar(params.snapSpeed);
+            const force = target.clone().sub(particle.position).normalize().multiplyScalar((params.snapSpeed || 6) * 2);
             particle.velocity.add(force);
             particle.isAffectedByInteraction = true;
         });
 
-        // The pull slowly drags the whole cluster toward the click. Gravity
-        // (in updateCluster) hits it far harder than this nudge does.
+        // The yank drags the whole cluster toward the click. clusterDrift is
+        // now 2.0 by default (was 0.5, which is why the swarm barely moved).
+        // Gravity in updateCluster still sags it over time, and the leash
+        // still keeps it on screen.
         if (sideDir.lengthSq() > 0.0001 && params.clusterVelocity) {
-            const nudge = sideDir.clone().normalize().multiplyScalar(params.clusterDrift || 0.5);
+            const nudge = sideDir.clone().normalize().multiplyScalar(params.clusterDrift || 2.0);
             params.clusterVelocity.add(nudge);
         }
     }
@@ -480,8 +541,9 @@ class App {
         params.clusterVelocity.y += (params.gravity || 0) * (params.clusterGravity || 1) * dt;
 
         // Leash: a gentle spring toward home so the hive can sag and drift but
-        // never wander off-screen entirely.
-        const LEASH_RADIUS = 8;
+        // never wander off-screen entirely. 6, not 8: with a 4.5-radius bag,
+        // a center at 8 would push the bag's far edge to 12.5 from origin.
+        const LEASH_RADIUS = 6;
         const distFromHome = params.clusterCenter.length();
         if (distFromHome > LEASH_RADIUS) {
             const pull = params.clusterCenter.clone().normalize()
@@ -492,10 +554,10 @@ class App {
         params.clusterVelocity.multiplyScalar(Math.pow(0.99, dt * 60));
         params.clusterCenter.add(params.clusterVelocity.clone().multiplyScalar(dt));
 
-        // The net follows the hive.
+        // The net follows the hive, at exactly the physics radius.
         if (this.netMesh) {
             this.netMesh.position.copy(params.clusterCenter);
-            this.netMesh.scale.setScalar(params.netRadius || 12);
+            this.netMesh.scale.setScalar(params.netRadius || 4.5);
         }
     }
 
@@ -510,6 +572,7 @@ class App {
 
         if (this.particleSystem) {
             this.updateCluster(deltaTime);
+            this.maintainGlitchSwarm();
             this.particleSystem.update(deltaTime);
         }
 
