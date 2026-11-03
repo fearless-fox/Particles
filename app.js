@@ -276,8 +276,12 @@ class App {
         const context = canvas.getContext('2d');
 
         const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
-        gradient.addColorStop(0, '#000000'); 
-        gradient.addColorStop(1, '#310342'); 
+        // v7: lighter background across ALL modes (user call 2026-11-03).
+        // Was black -> dark purple (#000000 -> #310342), which swallowed
+        // the swarm and the red mesh. Now Slate -> Bone (FUAX kit):
+        // clearly lighter, still mid-toned at the top so particles read.
+        gradient.addColorStop(0, '#646E7A');
+        gradient.addColorStop(1, '#EDEDE6');
 
         context.fillStyle = gradient;
         context.fillRect(0, 0, canvas.width, canvas.height);
