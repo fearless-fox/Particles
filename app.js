@@ -140,7 +140,12 @@ class App {
         // follows the particles and never leads them.
         const netGeometry = new THREE.SphereGeometry(1, 28, 20);
         {
+            // v6: blob displacement is NORMALIZED so its farthest vertex
+            // is exactly radius 1. Before, displacement ran up to ~1.38x,
+            // so a mesh scaled to the swarm still ballooned ~38% past it
+            // and read as loose. Now scale = swarm extent, period.
             const pos = netGeometry.attributes.position;
+            let maxLen = 0;
             for (let i = 0; i < pos.count; i++) {
                 const vx = pos.getX(i), vy = pos.getY(i), vz = pos.getZ(i);
                 const len = Math.sqrt(vx * vx + vy * vy + vz * vz) || 1;
@@ -150,6 +155,13 @@ class App {
                     + 0.12 * Math.cos(dz * 5 + 2.0)
                     + 0.08 * Math.sin(dy * 6 + dx * 2);
                 pos.setXYZ(i, vx * disp, vy * disp, vz * disp);
+                const nl = Math.sqrt(pos.getX(i) ** 2 + pos.getY(i) ** 2 + pos.getZ(i) ** 2);
+                if (nl > maxLen) maxLen = nl;
+            }
+            if (maxLen > 0) {
+                for (let i = 0; i < pos.count; i++) {
+                    pos.setXYZ(i, pos.getX(i) / maxLen, pos.getY(i) / maxLen, pos.getZ(i) / maxLen);
+                }
             }
             pos.needsUpdate = true;
         }
@@ -569,9 +581,9 @@ class App {
             particle.velocity.add(dir.clone().multiplyScalar((params.snapSpeed || 6) * 3));
             if (particle.escapeDir) {
                 particle.escapeDir.copy(dir);
-                particle.escapeTimer = 5.0;
+                particle.escapeTimer = 3.0;
             }
-            particle.clickTimer = 5.0;
+            particle.clickTimer = 3.0;
             particle.isAffectedByInteraction = true;
         });
     }
@@ -624,7 +636,7 @@ class App {
         // use it this frame: active for 5s after a click, long enough to
         // translate at low FPS (the v4 3s window expired before the swarm
         // could visibly move at 4-6 FPS).
-        params.yankActive = this.lastGlitchClickTime ? (Date.now() - this.lastGlitchClickTime < 5000) : false;
+        params.yankActive = this.lastGlitchClickTime ? (Date.now() - this.lastGlitchClickTime < 3000) : false;
 
         const centroid = this.computeSwarmCentroid();
         if (centroid) {
@@ -666,15 +678,16 @@ class App {
             const d = p.position.distanceTo(centroid);
             if (d > maxDist) maxDist = d;
         });
-        // v4 mesh scale: capped at 1.15x netRadius (was 1.3x) and
-        // smoothed toward its target, so it cannot balloon 3x in one
-        // frame when a few hornets stretch out. Snug, not popping.
-        const targetRadius = Math.max(
-            (params.netRadius || 4.5) * 0.7,
-            Math.min(maxDist * 1.05, (params.netRadius || 4.5) * 1.15)
-        );
+        // v6 mesh scale: FIT THE SWARM, nothing else. No floor (the
+        // old 0.7x netRadius floor kept the mesh at 3.15 even when the
+        // swarm was tighter) and no cap, and the blob geometry is
+        // normalized to radius 1 above, so scale = farthest hornet x
+        // 1.03. The mesh is visual only: it follows the swarm's shape,
+        // it never forces the swarm into a sphere. Tracking is faster
+        // (x8) so the mesh keeps up with jumps instead of lagging loose.
+        const targetRadius = Math.max(0.5, maxDist * 1.03);
         if (this.meshScaleSmooth === undefined) this.meshScaleSmooth = targetRadius;
-        this.meshScaleSmooth += (targetRadius - this.meshScaleSmooth) * Math.min(1, deltaTime * 3);
+        this.meshScaleSmooth += (targetRadius - this.meshScaleSmooth) * Math.min(1, deltaTime * 8);
         this.netMesh.position.copy(centroid);
         this.netMesh.scale.setScalar(this.meshScaleSmooth);
         this.netMesh.rotation.y += deltaTime * 0.25;

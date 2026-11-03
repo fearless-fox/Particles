@@ -21,6 +21,11 @@ export default class Particle {
         // 0.4-1.2s, so each hornet keeps trying a new way out on its own.
         this.escapeDir = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
         this.escapeTimer = 0.4 + Math.random() * 0.8;
+        // v6 rest jumps: a discrete burst direction + staggered timer,
+        // so hornets visibly JUMP in random directions at rest instead
+        // of trembling in place while tethers/net cancel the push.
+        this.jumpDir = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+        this.jumpTimer = Math.random() * 2.0;
         // Click boost: set by app.js when this hornet is one of the few
         // yanked toward a click. While it runs, this hornet can break
         // away from the swarm (expanded boundary, weaker tethers, faster
@@ -103,13 +108,32 @@ export default class Particle {
                     else escapeStrength = baseEscape;
                     this.velocity.add(this.escapeDir.clone().multiplyScalar(escapeStrength * deltaTime));
 
-                    // v5 global yank pull: STRONG (20, was 3) toward the
-                    // click target for every hornet during a yank, so the
-                    // whole swarm actually translates, not just deforms.
+                    // v6: discrete rest jumps. Only at rest (no yank,
+                    // no click boost): when a hornet's jump timer fires,
+                    // it gets one hard burst in a fresh random direction
+                    // and a new staggered timer, so jumps are individual
+                    // and visible, not a whole-ball hop. The speed cap
+                    // below trims the burst to the rest cap, and tethers
+                    // + net pull it back — the "trying to break free"
+                    // motion, not a drift.
+                    if (!this.particleParams.yankActive && this.clickTimer <= 0) {
+                        this.jumpTimer -= deltaTime;
+                        if (this.jumpTimer <= 0) {
+                            this.jumpDir.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+                            this.velocity.add(this.jumpDir.clone().multiplyScalar(14));
+                            this.jumpTimer = 0.7 + Math.random() * 1.5;
+                        }
+                    }
+
+                    // v6 global yank pull: SNAP (70, was 20) toward the
+                    // click target for every hornet during a yank. v5's
+                    // 20 against the rest speed cap read as a molasses
+                    // creep; the yank cap below is raised to match, so
+                    // the swarm translates fast, then resumes jumping.
                     if (this.particleParams.yankActive && this.particleParams.yankTarget) {
                         const toYank = new THREE.Vector3().copy(this.particleParams.yankTarget).sub(this.position);
                         if (toYank.lengthSq() > 0.0001) {
-                            this.velocity.add(toYank.normalize().multiplyScalar(20 * deltaTime));
+                            this.velocity.add(toYank.normalize().multiplyScalar(70 * deltaTime));
                         }
                     }
 
@@ -127,8 +151,8 @@ export default class Particle {
 
                     // Occasional glitch spike: a sudden burst in a random
                     // direction, so the swarm flickers angry even at rest.
-                    if (Math.random() < 0.002) {
-                        this.velocity.add(new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize().multiplyScalar(3));
+                    if (Math.random() < 0.005) {
+                        this.velocity.add(new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize().multiplyScalar(5));
                     }
 
                     // 2. Tethers: pull toward / push away from only the nearest
@@ -198,11 +222,13 @@ export default class Particle {
                 }
 
                 // Speed cap for the bag only: angry, not exploding.
-                // Click-boosted hornets get a higher cap so the yank is
-                // actually visible across the field.
+                // v6: during a yank the cap is raised for EVERY hornet
+                // (32, yanked few 48), because a 20-pull capped at 11
+                // was the molasses. At rest the cap stays 11.
                 if (netRadius !== undefined) {
                     const baseMax = this.particleParams.maxSpeed || 11;
-                    const maxSpeed = this.clickTimer > 0 ? baseMax * 1.8 : baseMax;
+                    const maxSpeed = this.clickTimer > 0 ? 48
+                        : (this.particleParams.yankActive ? 32 : baseMax);
                     const speed = this.velocity.length();
                     if (speed > maxSpeed) {
                         this.velocity.multiplyScalar(maxSpeed / speed);
