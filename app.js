@@ -448,6 +448,15 @@ class App {
                     previousMouseY = event.touches[0].clientY;
                     touchStartTime = Date.now();
                     event.preventDefault();
+                    // Touch parity with mousedown: a tap in Glitch mode
+                    // must yank, exactly like a mouse click. Before this,
+                    // touchstart only set isDragging and touchmove/touchend
+                    // explicitly skipped Glitch, so touch did nothing.
+                    if (this.physicsMode === 'glitch') {
+                        const worldPos = getWorldPosition(event.touches[0].clientX, event.touches[0].clientY);
+                        glitchTarget.copy(worldPos);
+                        this.applyGlitchForce(glitchTarget);
+                    }
                 } else if (event.touches.length > 1) {
                     previousMouseX = event.touches[0].clientX;
                     previousMouseY = event.touches[0].clientY;
