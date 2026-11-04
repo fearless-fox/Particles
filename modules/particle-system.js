@@ -53,6 +53,12 @@ export default class ParticleSystem {
         this.points = new THREE.Points(this.geometry, this.material);
         this.scene.add(this.points);
 
+        // Apply the params' blend mode at startup, not just on mode
+        // switch: the material above defaults to Additive, while the
+        // params default to Subtractive, so Zen on load used to render
+        // with the wrong blend until the first mode switch.
+        this.updateBlendMode();
+
         this.emissionTimer = 0;
     }
 
@@ -155,7 +161,12 @@ export default class ParticleSystem {
             'multiply': THREE.MultiplyBlending,
             'subtractive': THREE.SubtractiveBlending
         };
-        this.material.blending = blendModes[this.particleParams.blendMode];
+        // Never assign an undefined blending mode (e.g. from a typo'd
+        // or NaN blendMode value): keep the current mode instead.
+        const next = blendModes[this.particleParams.blendMode];
+        if (next !== undefined) {
+            this.material.blending = next;
+        }
     }
 
     gentleClear() {

@@ -69,7 +69,10 @@ export default class UI {
     }
 
     updateParameter(id, value, type) {
-        const numValue = type === 'color' ? value : parseFloat(value);
+        // Selects carry strings, not numbers: parseFloat('subtractive')
+        // is NaN, which used to overwrite blendMode with NaN and then
+        // make updateBlendMode assign an undefined blending mode.
+        const numValue = (type === 'color' || type === 'select-one') ? value : parseFloat(value);
 
         if (id.includes('Color')) {
             this.app.particleParams[id] = new THREE.Color(value);
